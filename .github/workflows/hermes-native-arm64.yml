@@ -1,0 +1,146 @@
+name: Fork ARM64 validation - CoACD
+'on':
+  push:
+    branches:
+    - hermes-ci/windows-arm64-c6ba647311d2
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: fork-arm64-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.os }} - ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+        - os: windows-11-arm
+          arch: ARM64
+          windows-build: cp3{12,13}-win_arm64
+          cmake-platform: ARM64
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+        persist-credentials: false
+        ref: c6ba647311d23a9a3c41f7bb9c34fc9892f82bd8
+    - name: Verify exact public PR source revision
+      shell: pwsh
+      run: '$actual = git rev-parse HEAD
+
+        if ($actual -ne ''c6ba647311d23a9a3c41f7bb9c34fc9892f82bd8'') { throw ''Source revision mismatch'' }
+
+        Write-Output (''TESTED_SOURCE_SHA=''+$actual)'
+    - name: Setup native Windows ARM64 Python
+      if: matrix.os == 'windows-11-arm'
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        architecture: arm64
+    - name: Install Dependencies macOS
+      if: runner.os == 'macOS'
+      run: pip3 install --break-system-packages wheel
+    - name: Install Dependencies macOS
+      if: runner.os != 'macOS'
+      run: pip3 install -U wheel
+    - name: Configure MSVC environment
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: ${{ matrix.cmake-platform }}
+    - name: Check MSVC Release flags
+      if: runner.os == 'Windows'
+      run: 'python -m pip install cmake ninja
+
+        python -m unittest discover -s tests -p test_cmake_release.py -v
+
+        '
+    - name: Build Wheels
+      uses: pypa/cibuildwheel@v2.22.0
+      env:
+        CIBW_ARCHS: ${{ matrix.arch }}
+        CIBW_BUILD: 'cp3{9,10,11,12,13}-macosx_${{ matrix.arch }} cp3{9,10,11,12,13}-manylinux_${{ matrix.arch }} ${{ matrix.windows-build }}
+
+          '
+        CIBW_ENVIRONMENT_WINDOWS: 'CMAKE_GENERATOR_PLATFORM=${{ matrix.cmake-platform }} CMAKE_BUILD_PARALLEL_LEVEL=2
+
+          '
+        CIBW_BEFORE_BUILD_WINDOWS: ${{ matrix.arch == 'ARM64' && 'python -m pip install delvewheel==1.13.2' || '' }}
+        CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: ${{ matrix.arch == 'ARM64' && 'delvewheel repair --analyze-existing -w {dest_dir} {wheel}' || '' }}
+        MACOSX_DEPLOYMENT_TARGET: '11'
+        CIBW_BUILD_VERBOSITY: 1
+    - name: List Build Results
+      run: ls wheelhouse
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: wheels-${{ matrix.os }}-${{ matrix.arch }}
+        path: ./wheelhouse/*.whl
+        if-no-files-found: warn
+        compression-level: 6
+        overwrite: false
+        include-hidden-files: false
+    env:
+      OMP_NUM_THREADS: '2'
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    if: github.repository_owner == 'johnnynunez'
+  run:
+    name: Test on ${{ matrix.os }} with Python ${{ matrix.python-version }}
+    needs:
+    - build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+        - os: windows-11-arm
+          arch: ARM64
+          python-version: '3.12'
+        - os: windows-11-arm
+          arch: ARM64
+          python-version: '3.13'
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+        ref: c6ba647311d23a9a3c41f7bb9c34fc9892f82bd8
+    - name: Verify exact public PR source revision
+      shell: pwsh
+      run: '$actual = git rev-parse HEAD
+
+        if ($actual -ne ''c6ba647311d23a9a3c41f7bb9c34fc9892f82bd8'') { throw ''Source revision mismatch'' }
+
+        Write-Output (''TESTED_SOURCE_SHA=''+$actual)'
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        architecture: ${{ matrix.arch == 'ARM64' && 'arm64' || '' }}
+    - name: Download Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: wheels-${{ matrix.os }}-${{ matrix.arch }}
+        path: built_wheels
+    - name: Display structure of downloaded files
+      run: ls -R built_wheels
+    - name: Install Dependencies
+      run: python -m pip install trimesh numpy
+    - name: Install Packages
+      run: python -m pip install --no-index --find-links built_wheels coacd
+    - name: Run Tests
+      run: python run_tests.py -v
+    env:
+      OMP_NUM_THREADS: '2'
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    if: github.repository_owner == 'johnnynunez'
